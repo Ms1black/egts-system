@@ -1,0 +1,13 @@
+services:
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    ports:
+      - "${PORT:-8000}:8000"
+      - "${TCP_PORT:-6001}:6001"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8000"
+      TCP_PORT: "${TCP_PORT:-6001}"
+    restart: unless-stopped

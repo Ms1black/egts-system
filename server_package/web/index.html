@@ -1,0 +1,560 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Мониторинг транспорта</title>
+    <link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet" />
+    <style>
+      *, *::before, *::after { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: Inter, system-ui, sans-serif;
+        font-size: 13px;
+        background: #fff;
+        color: #111;
+      }
+      .layout {
+        display: grid;
+        grid-template-columns: 280px 1fr;
+        height: 100vh;
+      }
+      .panel {
+        display: flex;
+        flex-direction: column;
+        border-right: 1px solid #e5e5e5;
+        overflow: hidden;
+      }
+      .panel-header {
+        padding: 16px 16px 12px;
+        border-bottom: 1px solid #e5e5e5;
+      }
+      .panel-header h2 {
+        margin: 0 0 8px;
+        font-size: 14px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+        color: #111;
+      }
+      .meta-row {
+        display: flex;
+        gap: 16px;
+        color: #666;
+        font-size: 12px;
+        align-items: center;
+      }
+      .meta-row span strong { color: #111; font-weight: 500; }
+      .panel-filters {
+        padding: 10px 16px;
+        border-bottom: 1px solid #e5e5e5;
+      }
+      .panel-filters select {
+        width: 100%;
+        border: 1px solid #d5d5d5;
+        border-radius: 6px;
+        padding: 6px 8px;
+        font-size: 12px;
+        color: #111;
+        background: #fff;
+        appearance: none;
+        cursor: pointer;
+        outline: none;
+      }
+      .panel-filters select:focus { border-color: #999; }
+      .vehicles-list {
+        flex: 1;
+        overflow-y: auto;
+        padding: 8px;
+      }
+      .vehicle-card {
+        border: 1px solid #e5e5e5;
+        border-radius: 8px;
+        padding: 10px 12px;
+        margin-bottom: 6px;
+        cursor: pointer;
+        transition: background 0.12s;
+        border-left-width: 3px;
+      }
+      .vehicle-card:hover { background: #f7f7f7; }
+      .vehicle-card.active { background: #f2f2f2; }
+      .vehicle-id { font-weight: 600; font-size: 13px; margin-bottom: 4px; color: #111; }
+      .vehicle-meta { color: #666; font-size: 11px; line-height: 1.6; }
+      #connectionStatus {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 11px;
+        color: #666;
+      }
+      .status-dot {
+        width: 6px; height: 6px;
+        border-radius: 50%;
+        background: #bbb;
+        flex-shrink: 0;
+      }
+      .status-dot.connected    { background: #22c55e; }
+      .status-dot.reconnecting { background: #f59e0b; }
+      .status-dot.error        { background: #ef4444; }
+      #map { height: 100vh; }
+      .vehicles-list::-webkit-scrollbar { width: 4px; }
+      .vehicles-list::-webkit-scrollbar-track { background: transparent; }
+      .vehicles-list::-webkit-scrollbar-thumb { background: #ddd; border-radius: 2px; }
+      @media (max-width: 860px) {
+        .layout { grid-template-columns: 1fr; grid-template-rows: 260px 1fr; }
+        .panel { border-right: none; border-bottom: 1px solid #e5e5e5; }
+        #map { height: 100%; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="layout">
+      <aside class="panel">
+        <div class="panel-header">
+          <h2>Мониторинг транспорта</h2>
+          <div class="meta-row">
+            <div id="connectionStatus">
+              <span class="status-dot" id="statusDot"></span>
+              <span id="statusText">подключение…</span>
+            </div>
+            <span>ТС: <strong id="vehiclesCount">0</strong></span>
+          </div>
+        </div>
+        <div class="panel-filters">
+          <select id="vehicleSelector">
+            <option value="__all__">Все ТС</option>
+          </select>
+        </div>
+        <div class="vehicles-list" id="vehiclesList"></div>
+      </aside>
+      <main id="map"></main>
+    </div>
+ 
+    <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+    <script>
+      // ─── State ───────────────────────────────────────────────────────────────
+      const state = { vehicles: {}, tracks: {}, destinations: {} };
+ 
+      // Per-vehicle smooth interpolation state
+      // { [id]: { from, to, fromBearing, toBearing, startTime, duration } }
+      const anim = {};
+ 
+      const palette = ["#3b82f6","#10b981","#f97316","#a855f7","#eab308","#ef4444"];
+      const INTERP_DURATION = 800; // ms — tune to match your telemetry interval
+ 
+      let mapReady = false;
+      let mapFitted = false;
+      let selectedVehicleId = "__all__";
+      let lastViewportTarget = null;
+ 
+      // ─── Map init ─────────────────────────────────────────────────────────────
+      const map = new maplibregl.Map({
+        container: "map",
+        style: "https://tiles.openfreemap.org/styles/liberty",
+        center: [116.44, 39.92],
+        zoom: 11,
+      });
+      map.addControl(new maplibregl.NavigationControl(), "top-right");
+ 
+      map.on("load", () => {
+        // Tracks
+        map.addSource("vehicle-tracks", {
+          type: "geojson",
+          data: { type: "FeatureCollection", features: [] },
+        });
+        map.addLayer({
+          id: "tracks",
+          type: "line",
+          source: "vehicle-tracks",
+          paint: {
+            "line-width": ["case", ["boolean", ["get", "is_active"], false], 3, 2],
+            "line-color": ["coalesce", ["get", "color"], "#3b82f6"],
+            "line-opacity": ["case", ["boolean", ["get", "is_active"], false], 0.9, 0.4],
+            "line-dasharray": [2, 2.4],
+          },
+        });
+
+        map.addSource("vehicle-destinations", {
+          type: "geojson",
+          data: { type: "FeatureCollection", features: [] },
+        });
+        map.addLayer({
+          id: "destination-ring",
+          type: "circle",
+          source: "vehicle-destinations",
+          paint: {
+            "circle-radius": 7,
+            "circle-color": "#fff",
+            "circle-stroke-width": 2,
+            "circle-stroke-color": ["coalesce", ["get", "color"], "#3b82f6"],
+            "circle-opacity": 1,
+          },
+        });
+        map.addLayer({
+          id: "destination-dot",
+          type: "circle",
+          source: "vehicle-destinations",
+          paint: {
+            "circle-radius": 3,
+            "circle-color": ["coalesce", ["get", "color"], "#3b82f6"],
+          },
+        });
+ 
+        // Live vehicle positions (driven by rAF interpolation)
+        map.addSource("vehicle-points", {
+          type: "geojson",
+          data: { type: "FeatureCollection", features: [] },
+        });
+        // Fallback dot
+        map.addLayer({
+          id: "vehicle-dots",
+          type: "circle",
+          source: "vehicle-points",
+          paint: {
+            "circle-radius": 6,
+            "circle-color": ["coalesce", ["get", "color"], "#3b82f6"],
+            "circle-stroke-width": 2,
+            "circle-stroke-color": "#fff",
+          },
+        });
+        map.addLayer({
+          id: "vehicle-labels",
+          type: "symbol",
+          source: "vehicle-points",
+          layout: {
+            "text-field": ["get", "vehicle_id"],
+            "text-size": 11,
+            "text-offset": [0, 1.7],
+            "text-font": ["Noto Sans Regular"],
+          },
+          paint: {
+            "text-color": "#111",
+            "text-halo-color": "#fff",
+            "text-halo-width": 1.5,
+          },
+        });
+ 
+        // Car icon
+        const img = new Image();
+        img.onload = () => {
+          if (!map.hasImage("car-icon")) map.addImage("car-icon", img, { sdf: false });
+          addCarLayer();
+        };
+        img.onerror = () => {
+          map.loadImage(`${location.origin}/icons/car.png`, (err, image) => {
+            if (err || !image) return;
+            if (!map.hasImage("car-icon")) map.addImage("car-icon", image);
+            addCarLayer();
+          });
+        };
+        img.src = `${location.origin}/icons/car.svg`;
+ 
+        function addCarLayer() {
+          if (map.getLayer("vehicle-cars")) return;
+          map.addLayer({
+            id: "vehicle-cars",
+            type: "symbol",
+            source: "vehicle-points",
+            layout: {
+              "icon-image": "car-icon",
+              "icon-size": 0.18,
+              "icon-allow-overlap": true,
+              "icon-ignore-placement": true,
+              "icon-rotate": ["coalesce", ["get", "bearing"], 0],
+              "icon-rotation-alignment": "map",
+              "icon-anchor": "center",
+            },
+          });
+          map.setLayoutProperty("vehicle-dots", "visibility", "none");
+        }
+ 
+        map.on("click", "tracks", (e) => {
+          const vid = e.features?.[0]?.properties?.vehicle_id;
+          if (!vid) return;
+          selectedVehicleId = vid;
+          renderSidebar();
+          updateStaticLayers();
+        });
+        map.on("mouseenter", "tracks", () => { map.getCanvas().style.cursor = "pointer"; });
+        map.on("mouseleave", "tracks", () => { map.getCanvas().style.cursor = ""; });
+ 
+        mapReady = true;
+        startAnimLoop();
+      });
+ 
+      // ─── Math helpers ─────────────────────────────────────────────────────────
+      function calcBearing(lon1, lat1, lon2, lat2) {
+        const r = Math.PI / 180;
+        const dLon = (lon2 - lon1) * r;
+        const y = Math.sin(dLon) * Math.cos(lat2 * r);
+        const x = Math.cos(lat1 * r) * Math.sin(lat2 * r)
+                - Math.sin(lat1 * r) * Math.cos(lat2 * r) * Math.cos(dLon);
+        return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
+      }
+ 
+      function lerpAngle(a, b, t) {
+        const diff = ((b - a + 540) % 360) - 180;
+        return (a + diff * t + 360) % 360;
+      }
+ 
+      function lerp(a, b, t) { return a + (b - a) * t; }
+ 
+      function vehicleColor(id) {
+        let h = 0;
+        for (let i = 0; i < id.length; i++) h = (h + id.charCodeAt(i)) % 997;
+        return palette[h % palette.length];
+      }
+ 
+      function setStatus(label, st) {
+        document.getElementById("statusText").textContent = label;
+        document.getElementById("statusDot").className = "status-dot " + (st || "");
+      }
+ 
+      // ─── rAF animation loop ───────────────────────────────────────────────────
+      // Runs every frame; interpolates each vehicle toward its target position.
+      function startAnimLoop() {
+        function frame(now) {
+          requestAnimationFrame(frame);
+          if (!mapReady) return;
+ 
+          const features = [];
+          const visibleIds = Object.keys(state.vehicles).filter(id =>
+            selectedVehicleId === "__all__" || id === selectedVehicleId
+          );
+ 
+          for (const id of visibleIds) {
+            const a = anim[id];
+            if (!a) continue;
+ 
+            const t  = a.duration > 0 ? Math.min((now - a.startTime) / a.duration, 1) : 1;
+            const et = t;
+ 
+            features.push({
+              type: "Feature",
+              geometry: {
+                type: "Point",
+                coordinates: [
+                  lerp(a.from[0], a.to[0], et),
+                  lerp(a.from[1], a.to[1], et),
+                ],
+              },
+              properties: {
+                vehicle_id: id,
+                color: vehicleColor(id),
+                bearing: lerpAngle(a.fromBearing, a.toBearing, et),
+              },
+            });
+          }
+ 
+          map.getSource("vehicle-points").setData({
+            type: "FeatureCollection",
+            features,
+          });
+        }
+        requestAnimationFrame(frame);
+      }
+ 
+      // ─── Static layers (tracks + destinations) ────────────────────────────────
+      function updateStaticLayers() {
+        if (!mapReady) return;
+ 
+        const lineFeatures = [];
+        const destFeatures = [];
+        const bounds = new maplibregl.LngLatBounds();
+        let hasBounds = false;
+ 
+        for (const [id, coords] of Object.entries(state.tracks)) {
+          if (selectedVehicleId !== "__all__" && id !== selectedVehicleId) continue;
+          if (!coords || coords.length === 0) continue;
+ 
+          const color    = vehicleColor(id);
+          const isActive = selectedVehicleId === "__all__" || selectedVehicleId === id;
+ 
+          if (coords.length >= 2) {
+            lineFeatures.push({
+              type: "Feature",
+              geometry: { type: "LineString", coordinates: coords },
+              properties: { vehicle_id: id, color, is_active: isActive },
+            });
+          }
+
+          const dest = state.destinations[id];
+          if (dest) {
+            destFeatures.push({
+              type: "Feature",
+              geometry: { type: "Point", coordinates: dest },
+              properties: { vehicle_id: id, color, is_active: isActive },
+            });
+            bounds.extend(dest);
+            hasBounds = true;
+          }
+ 
+          for (const c of coords) { bounds.extend(c); hasBounds = true; }
+        }
+ 
+        // Also include current animated positions in bounds
+        for (const id of Object.keys(state.vehicles)) {
+          if (selectedVehicleId !== "__all__" && id !== selectedVehicleId) continue;
+          if (anim[id]) { bounds.extend(anim[id].to); hasBounds = true; }
+        }
+ 
+        map.getSource("vehicle-tracks").setData({ type: "FeatureCollection", features: lineFeatures });
+        map.getSource("vehicle-destinations").setData({ type: "FeatureCollection", features: destFeatures });
+ 
+        const target = selectedVehicleId;
+        if (hasBounds && (!mapFitted || target !== lastViewportTarget)) {
+          map.fitBounds(bounds, {
+            padding: selectedVehicleId === "__all__" ? 60 : 100,
+            duration: 700,
+            maxZoom: 15,
+          });
+          mapFitted = true;
+          lastViewportTarget = target;
+        }
+      }
+ 
+      // ─── Sidebar ─────────────────────────────────────────────────────────────
+      function renderSidebar() {
+        const vehicles = Object.values(state.vehicles).sort((a, b) =>
+          a.record.vehicle_id.localeCompare(b.record.vehicle_id)
+        );
+        const ids = vehicles.map(v => v.record.vehicle_id);
+ 
+        if (selectedVehicleId !== "__all__" && !ids.includes(selectedVehicleId)) {
+          selectedVehicleId = "__all__";
+        }
+ 
+        const sel = document.getElementById("vehicleSelector");
+        sel.innerHTML = ['<option value="__all__">Все ТС</option>',
+          ...ids.map(id => `<option value="${id}">${id}</option>`)
+        ].join("");
+        sel.value = selectedVehicleId;
+ 
+        document.getElementById("vehiclesCount").textContent = vehicles.length;
+ 
+        document.getElementById("vehiclesList").innerHTML = vehicles.map(v => {
+          const r = v.record;
+          const color = vehicleColor(r.vehicle_id);
+          const active = selectedVehicleId === r.vehicle_id;
+          return `<div class="vehicle-card${active ? " active" : ""}"
+                       data-id="${r.vehicle_id}"
+                       style="border-left-color:${color}">
+            <div class="vehicle-id">${r.vehicle_id}</div>
+            <div class="vehicle-meta">
+              ${r.speed_kmh.toFixed(1)} км/ч &nbsp;·&nbsp;
+              ${r.latitude.toFixed(5)}, ${r.longitude.toFixed(5)}<br>
+              ${new Date(r.timestamp).toLocaleTimeString()}
+            </div>
+          </div>`;
+        }).join("");
+ 
+        document.querySelectorAll(".vehicle-card").forEach(card => {
+          card.addEventListener("click", () => {
+            selectedVehicleId = card.dataset.id;
+            renderSidebar();
+            updateStaticLayers();
+          });
+        });
+      }
+ 
+      // ─── Telemetry ────────────────────────────────────────────────────────────
+      function applySnapshot(payload) {
+        state.vehicles = payload.vehicles || {};
+        state.tracks   = payload.tracks   || {};
+        state.destinations = {};
+ 
+        for (const [id, packet] of Object.entries(state.vehicles)) {
+          const coords  = state.tracks[id];
+          const pos     = coords?.length ? coords[coords.length - 1]
+                                         : [packet.record.longitude, packet.record.latitude];
+          const prev    = coords?.length > 1 ? coords[coords.length - 2] : null;
+          const bearing = prev ? calcBearing(prev[0], prev[1], pos[0], pos[1]) : 0;
+          const destLon = packet.record.destination_longitude;
+          const destLat = packet.record.destination_latitude;
+          if (Number.isFinite(destLon) && Number.isFinite(destLat)) {
+            state.destinations[id] = [destLon, destLat];
+          } else if (coords?.length) {
+            // Backward-compatible fallback for old packets without destination_* fields.
+            state.destinations[id] = [coords[coords.length - 1][0], coords[coords.length - 1][1]];
+          }
+          anim[id] = { from: pos, to: pos, fromBearing: bearing, toBearing: bearing,
+                       startTime: 0, duration: 0 };
+        }
+ 
+        renderSidebar();
+        updateStaticLayers();
+      }
+ 
+      function applyTelemetry(packet) {
+        const id  = packet.record.vehicle_id;
+        const now = performance.now();
+ 
+        state.vehicles[id] = packet;
+        state.tracks[id]   = state.tracks[id] || [];
+        state.tracks[id].push([packet.record.longitude, packet.record.latitude]);
+        if (state.tracks[id].length > 2000) state.tracks[id] = state.tracks[id].slice(-2000);
+        const destLon = packet.record.destination_longitude;
+        const destLat = packet.record.destination_latitude;
+        if (Number.isFinite(destLon) && Number.isFinite(destLat)) {
+          state.destinations[id] = [destLon, destLat];
+        } else if (!state.destinations[id]) {
+          state.destinations[id] = [packet.record.longitude, packet.record.latitude];
+        }
+ 
+        const coords     = state.tracks[id];
+        const newPos     = coords[coords.length - 1];
+        const prevPos    = coords.length > 1 ? coords[coords.length - 2] : newPos;
+        const newBearing = calcBearing(prevPos[0], prevPos[1], newPos[0], newPos[1]);
+ 
+        // Interpolate FROM current animated position (avoids jump on fast update)
+        const existing = anim[id];
+        let curPos = newPos, curBearing = newBearing;
+        if (existing && existing.duration > 0) {
+          const t  = Math.min((now - existing.startTime) / existing.duration, 1);
+          const et = t;
+          curPos = [
+            lerp(existing.from[0], existing.to[0], et),
+            lerp(existing.from[1], existing.to[1], et),
+          ];
+          curBearing = lerpAngle(existing.fromBearing, existing.toBearing, et);
+        }
+ 
+        anim[id] = {
+          from: curPos,
+          to: newPos,
+          fromBearing: curBearing,
+          toBearing: newBearing,
+          startTime: now,
+          duration: INTERP_DURATION,
+        };
+ 
+        renderSidebar();
+        updateStaticLayers();
+      }
+ 
+      // ─── WebSocket ────────────────────────────────────────────────────────────
+      function connectWs() {
+        const proto = location.protocol === "https:" ? "wss" : "ws";
+        const ws = new WebSocket(`${proto}://${location.host}/ws/live`);
+        ws.onopen = () => {
+          setStatus("подключено", "connected");
+          setInterval(() => ws.readyState === WebSocket.OPEN && ws.send("ping"), 15000);
+        };
+        ws.onmessage = (e) => {
+          const payload = JSON.parse(e.data);
+          if (payload.type === "snapshot")  applySnapshot(payload);
+          if (payload.type === "telemetry") applyTelemetry(payload.packet);
+        };
+        ws.onclose = () => { setStatus("переподключение…", "reconnecting"); setTimeout(connectWs, 1500); };
+        ws.onerror = () => setStatus("ошибка", "error");
+      }
+ 
+      document.getElementById("vehicleSelector").addEventListener("change", (e) => {
+        selectedVehicleId = e.target.value;
+        renderSidebar();
+        updateStaticLayers();
+      });
+ 
+      connectWs();
+    </script>
+  </body>
+</html>

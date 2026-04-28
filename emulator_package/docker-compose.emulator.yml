@@ -1,0 +1,18 @@
+services:
+  emulator:
+    build:
+      context: .
+      dockerfile: Dockerfile.emulator
+    volumes:
+      - ./dataset:/app/dataset:ro
+    environment:
+      SERVER_TCP_ADDR:         "${SERVER_TCP_ADDR?Set SERVER_TCP_ADDR, e.g. 192.168.1.10:6001}"
+      VEHICLES:                "${VEHICLES:-5}"
+      SEND_INTERVAL:           "${SEND_INTERVAL:-1.0}"
+      VEHICLE_PREFIX:          "${VEHICLE_PREFIX:-CAR}"
+      MAX_POINTS_PER_VEHICLE:  "${MAX_POINTS_PER_VEHICLE:-2500}"
+      MAX_JUMP_KM:             "${MAX_JUMP_KM:-200.0}"
+      DENSEST_CELL_SIZE_DEG:   "${DENSEST_CELL_SIZE_DEG:-1.0}"
+      MAP_MATCH_URL:           "${MAP_MATCH_URL:-http://router.project-osrm.org}"
+      MAP_MATCH_ENABLED:       "${MAP_MATCH_ENABLED:-0}"
+    restart: "no"

@@ -1,0 +1,22 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Копируем только серверную часть
+COPY app/models.py   ./app/models.py
+COPY app/server.py   ./app/server.py
+COPY app/utils.py    ./app/utils.py
+COPY app/__init__.py ./app/__init__.py
+COPY web/            ./web/
+
+EXPOSE 8000
+EXPOSE 6001
+
+ENV HOST=0.0.0.0
+ENV PORT=8000
+ENV TCP_PORT=6001
+
+CMD ["sh", "-c", "python -m app.server --host $HOST --port $PORT --tcp-port $TCP_PORT"]

@@ -1,0 +1,1 @@
+# No external dependencies — emulator uses only stdlib (asyncio, struct, csv, etc.)

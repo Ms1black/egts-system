@@ -1,0 +1,42 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Копируем только эмуляторную часть
+COPY app/models.py   ./app/models.py
+COPY app/emulator.py ./app/emulator.py
+COPY app/utils.py    ./app/utils.py
+COPY app/__init__.py ./app/__init__.py
+
+# dataset монтируется снаружи через volume
+RUN mkdir -p /app/dataset
+
+ENV SERVER_TCP_ADDR=CHANGE_ME:6001
+ENV DATASET_DIR=/app/dataset
+ENV VEHICLES=5
+ENV SEND_INTERVAL=1.0
+ENV VEHICLE_PREFIX=CAR
+ENV MAX_POINTS_PER_VEHICLE=2500
+ENV MAX_JUMP_KM=200.0
+ENV DENSEST_CELL_SIZE_DEG=1.0
+ENV MAP_MATCH_URL=http://router.project-osrm.org
+ENV MAP_MATCH_ENABLED=0
+
+CMD ["sh", "-c", "\
+  FLAG='--no-map-match'; \
+  [ \"$MAP_MATCH_ENABLED\" = '1' ] && FLAG='--map-match'; \
+  exec python -m app.emulator \
+    --server           \"$SERVER_TCP_ADDR\" \
+    --dataset-dir      \"$DATASET_DIR\" \
+    --vehicles         \"$VEHICLES\" \
+    --send-interval    \"$SEND_INTERVAL\" \
+    --vehicle-prefix   \"$VEHICLE_PREFIX\" \
+    --max-points-per-vehicle \"$MAX_POINTS_PER_VEHICLE\" \
+    --max-jump-km      \"$MAX_JUMP_KM\" \
+    --densest-cell-size-deg \"$DENSEST_CELL_SIZE_DEG\" \
+    --map-match-url    \"$MAP_MATCH_URL\" \
+    $FLAG \
+"]
