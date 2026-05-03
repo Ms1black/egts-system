@@ -116,7 +116,7 @@ def encode_egts_pos_data(
         pos_flags |= 0x10  # ALTS
 
     sr_body = struct.pack(
-        "<IIIBBBBBBBBB",
+        "<IIIBBBBBBBBBB",
         ntm, lat_raw, lon_raw,
         pos_flags, spd_lo, spd_hi, dir_byte,
         0, 0, 0,   # ODOMETER
